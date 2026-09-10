@@ -1,0 +1,107 @@
+import streamlit as st
+import pandas as pd
+from openpyxl import Workbook
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl.utils.dataframe import dataframe_to_rows
+from openpyxl.chart import BarChart, LineChart, Reference
+from io import BytesIO
+
+st.set_page_config(page_title="OTDR Dashboard Generator", layout="centered")
+
+st.title("📊 Mesin Generator Dashboard OTDR")
+st.write("Unggah file hasil OTDR (format `.xlsx` seperti Event_table) untuk menghasilkan Excel Dashboard interaktif lengkap dengan chart dan format warna.")
+
+uploaded_file = st.file_uploader("Upload File OTDR", type=["xlsx"])
+
+if uploaded_file is not None:
+    try:
+        # 1. Baca data dan bersihkan (skip 3 baris pertama)
+        df_raw = pd.read_excel(uploaded_file, skiprows=3)
+        
+        headers = [str(val).strip() if not pd.isna(val) else f"Col_{i}" for i, val in enumerate(df_raw.iloc[0])]
+        df_data = df_raw.iloc[1:].copy()
+        df_data.columns = headers
+        
+        # Rename kolom standar
+        std_cols = ['File', 'Fiber', 'Wavelength, ns', 'Loss, dB', 'Length, km', 'Attenuation, dB/km']
+        rename_dict = {col: std_cols[i] for i, col in enumerate(df_data.columns[1:7])}
+        df_data.rename(columns=rename_dict, inplace=True)
+        
+        if 'Col_0' in df_data.columns: df_data.drop(columns=['Col_0'], inplace=True)
+        
+        # Convert ke numerik
+        for col in ['Loss, dB', 'Length, km', 'Attenuation, dB/km']:
+            df_data[col] = pd.to_numeric(df_data[col], errors='coerce')
+
+        # 2. Buat Workbook Excel
+        wb = Workbook()
+        ws_dash = wb.active
+        ws_dash.title = "Dashboard"
+        ws_data = wb.create_sheet(title="Data OTDR")
+        
+        # Masukkan Data
+        for r in dataframe_to_rows(df_data, index=False, header=True):
+            ws_data.append(r)
+            
+        # Styling Data
+        header_fill = PatternFill(start_color="203764", end_color="203764", fill_type="solid")
+        font_white = Font(color="FFFFFF", bold=True)
+        border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+        
+        for cell in ws_data[1]:
+            cell.fill = header_fill
+            cell.font = font_white
+            cell.alignment = Alignment(horizontal="center")
+            
+        for row in ws_data.iter_rows(min_row=2):
+            for cell in row:
+                cell.border = border
+        ws_data.freeze_panes = "G2"
+        ws_data.auto_filter.ref = ws_data.dimensions
+
+        # Styling Dashboard
+        ws_dash['A1'] = "OTDR Analysis Dashboard"
+        ws_dash['A1'].font = Font(size=18, bold=True, color="203764")
+        
+        # Summary & Chart Data Setup
+        ws_summary = wb.create_sheet(title="ChartData")
+        ws_summary.sheet_state = 'hidden'
+        ws_summary.append(["File", "Loss, dB", "Attenuation"])
+        for _, row in df_data.iterrows():
+            ws_summary.append([row['File'], row['Loss, dB'], row['Attenuation, dB/km']])
+
+        # Chart 1: Loss Chart
+        chart1 = BarChart()
+        chart1.title = "Total Loss (dB) per Fiber"
+        data1 = Reference(ws_summary, min_col=2, min_row=1, max_row=ws_summary.max_row)
+        cats = Reference(ws_summary, min_col=1, min_row=2, max_row=ws_summary.max_row)
+        chart1.add_data(data1, titles_from_data=True)
+        chart1.set_categories(cats)
+        chart1.width = 16
+        chart1.height = 8
+        ws_dash.add_chart(chart1, "B4")
+
+        # Chart 2: Attenuation Chart
+        chart2 = LineChart()
+        chart2.title = "Attenuation (dB/km) Profile"
+        data2 = Reference(ws_summary, min_col=3, min_row=1, max_row=ws_summary.max_row)
+        chart2.add_data(data2, titles_from_data=True)
+        chart2.set_categories(cats)
+        chart2.width = 16
+        chart2.height = 8
+        ws_dash.add_chart(chart2, "K4")
+
+        # Simpan ke memori (buffer)
+        output = BytesIO()
+        wb.save(output)
+        
+        st.success("✅ Dashboard berhasil digenerate!")
+        st.download_button(
+            label="📥 Download Excel Dashboard",
+            data=output.getvalue(),
+            file_name="OTDR_Dashboard_Result.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        
+    except Exception as e:
+        st.error(f"Terjadi kesalahan dalam memproses file: {e}")
