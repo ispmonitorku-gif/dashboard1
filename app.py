@@ -7,9 +7,9 @@ import copy
 from openpyxl import load_workbook
 from io import BytesIO
 
-st.set_page_config(page_title="OTDR Dashboard NIX-PCM", layout="wide")
+st.set_page_config(page_title="OTDR Dashboard", layout="wide")
 
-st.title("📊 Mesin Generator Dashboard OTDR - NIX PCM")
+st.title("📊 Mesin Generator Dashboard OTDR")
 st.write("Sistem otomatis yang mengonversi file raw `Event_table` menjadi Dashboard identik 100% menggunakan template asli Anda.")
 
 # --- DUA TOMBOL UPLOAD AGAR TIDAK ERROR FILE NOT FOUND ---
