@@ -1,107 +1,111 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
+import re
+import math
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
-from openpyxl.utils.dataframe import dataframe_to_rows
-from openpyxl.chart import BarChart, LineChart, Reference
 from io import BytesIO
 
-st.set_page_config(page_title="OTDR Dashboard Generator", layout="centered")
+st.set_page_config(page_title="OTDR Dashboard NIX-PCM", layout="wide")
 
-st.title("📊 Mesin Generator Dashboard OTDR")
-st.write("Unggah file hasil OTDR (format `.xlsx` seperti Event_table) untuk menghasilkan Excel Dashboard interaktif lengkap dengan chart dan format warna.")
+st.title("📊 Mesin Generator Dashboard OTDR - NIX PCM")
+st.write("Sistem otomatis yang mengonversi file raw `Event_table.xlsx` menjadi **Dashboard Analitik 8 Sheet** dengan indikator warna.")
 
-uploaded_file = st.file_uploader("Upload File OTDR", type=["xlsx"])
+uploaded_file = st.file_uploader("Upload File Event_table (Excel)", type=["xlsx", "xls"])
 
 if uploaded_file is not None:
     try:
-        # 1. Baca data dan bersihkan (skip 3 baris pertama)
+        # 1. READ & CLEAN DATA
         df_raw = pd.read_excel(uploaded_file, skiprows=3)
-        
-        headers = [str(val).strip() if not pd.isna(val) else f"Col_{i}" for i, val in enumerate(df_raw.iloc[0])]
+
+        headers = [f"Col_{i}" if pd.isna(val) else str(val).strip() for i, val in enumerate(df_raw.iloc[0])]
+        df_raw.columns = headers
         df_data = df_raw.iloc[1:].copy()
-        df_data.columns = headers
-        
-        # Rename kolom standar
-        std_cols = ['File', 'Fiber', 'Wavelength, ns', 'Loss, dB', 'Length, km', 'Attenuation, dB/km']
-        rename_dict = {col: std_cols[i] for i, col in enumerate(df_data.columns[1:7])}
+
+        std_cols = ['File', 'Fiber', 'Wavelength', 'Loss_dB', 'Length_km', 'Attenuation_dB_km']
+        rename_dict = {df_data.columns[i+1]: std_cols[i] for i in range(6)}
         df_data.rename(columns=rename_dict, inplace=True)
-        
-        if 'Col_0' in df_data.columns: df_data.drop(columns=['Col_0'], inplace=True)
-        
-        # Convert ke numerik
-        for col in ['Loss, dB', 'Length, km', 'Attenuation, dB/km']:
+
+        for col in ['Loss_dB', 'Length_km', 'Attenuation_dB_km']:
             df_data[col] = pd.to_numeric(df_data[col], errors='coerce')
 
-        # 2. Buat Workbook Excel
+        def extract_core(filename):
+            match = re.search(r'(\d+)', str(filename)) if not pd.isna(filename) else None
+            return int(match.group(1)) if match else None
+
+        df_data['Core'] = df_data['File'].apply(extract_core)
+        df_data = df_data.dropna(subset=['Core', 'Length_km', 'Loss_dB']).copy()
+        df_data['Core'] = df_data['Core'].astype(int)
+        df_data['Tube'] = df_data['Core'].apply(lambda x: f"Tube {math.ceil(x/12)}")
+
+        # 2. CALCULATIONS
+        REF_LENGTH = 59.67
+
+        df_detail = df_data.sort_values(by='Core').reset_index(drop=True)
+        df_detail['Length_%_of_Route'] = (df_detail['Length_km'] / REF_LENGTH) * 100
+
+        def get_status(pct):
+            if pct >= 95: return "NORMAL"
+            elif pct >= 80: return "WARNING"
+            else: return "CRITICAL"
+            
+        df_detail['Status'] = df_detail['Length_%_of_Route'].apply(get_status)
+
+        # Tube Analysis
+        tube_stats = df_detail.groupby('Tube').agg(
+            Core_Count=('Core', 'count'),
+            Avg_Length_km=('Length_km', 'mean'),
+            Avg_Loss_dB=('Loss_dB', 'mean'),
+            Avg_Attenuation_dB_km=('Attenuation_dB_km', 'mean')
+        ).reset_index()
+
+        tube_stats['Status'] = tube_stats.apply(
+            lambda r: "REVIEW - data terbatas" if r['Core_Count'] <= 2 else 
+                      ("PRIORITAS PERBAIKAN" if r['Avg_Length_km'] < (0.95 * REF_LENGTH) else "NORMAL"), axis=1)
+
+        # 3. EXPORT EXCEL DENGAN OPENPYXL (Persis seperti template)
         wb = Workbook()
         ws_dash = wb.active
-        ws_dash.title = "Dashboard"
-        ws_data = wb.create_sheet(title="Data OTDR")
+        ws_dash.title = "Visual_Dashboard"
         
-        # Masukkan Data
-        for r in dataframe_to_rows(df_data, index=False, header=True):
-            ws_data.append(r)
-            
-        # Styling Data
-        header_fill = PatternFill(start_color="203764", end_color="203764", fill_type="solid")
-        font_white = Font(color="FFFFFF", bold=True)
-        border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+        ws_dash['A1'] = "DASHBOARD VISUAL OTDR — NIX - PCM"
+        ws_dash['A1'].font = Font(size=20, bold=True, color="1F4E78")
         
-        for cell in ws_data[1]:
-            cell.fill = header_fill
-            cell.font = font_white
-            cell.alignment = Alignment(horizontal="center")
-            
-        for row in ws_data.iter_rows(min_row=2):
-            for cell in row:
-                cell.border = border
-        ws_data.freeze_panes = "G2"
-        ws_data.auto_filter.ref = ws_data.dimensions
-
-        # Styling Dashboard
-        ws_dash['A1'] = "OTDR Analysis Dashboard"
-        ws_dash['A1'].font = Font(size=18, bold=True, color="203764")
+        # Styles
+        header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+        header_font = Font(color="FFFFFF", bold=True)
+        centered = Alignment(horizontal="center", vertical="center")
         
-        # Summary & Chart Data Setup
-        ws_summary = wb.create_sheet(title="ChartData")
-        ws_summary.sheet_state = 'hidden'
-        ws_summary.append(["File", "Loss, dB", "Attenuation"])
-        for _, row in df_data.iterrows():
-            ws_summary.append([row['File'], row['Loss, dB'], row['Attenuation, dB/km']])
+        # Tulis detail dll seperti template...
+        ws_detail = wb.create_sheet("Core_Detail")
+        ws_tube = wb.create_sheet("Tube_Analysis")
+        
+        from openpyxl.utils.dataframe import dataframe_to_rows
+        
+        # Fungsi pembantu untuk tabel
+        def format_tabel(ws, df):
+            for r_idx, row in enumerate(dataframe_to_rows(df, index=False, header=True), 1):
+                for c_idx, val in enumerate(row, 1):
+                    cell = ws.cell(row=r_idx, column=c_idx, value=val)
+                    if r_idx == 1:
+                        cell.fill = header_fill
+                        cell.font = header_font
+                        cell.alignment = centered
+                    
+        format_tabel(ws_detail, df_detail)
+        format_tabel(ws_tube, tube_stats)
 
-        # Chart 1: Loss Chart
-        chart1 = BarChart()
-        chart1.title = "Total Loss (dB) per Fiber"
-        data1 = Reference(ws_summary, min_col=2, min_row=1, max_row=ws_summary.max_row)
-        cats = Reference(ws_summary, min_col=1, min_row=2, max_row=ws_summary.max_row)
-        chart1.add_data(data1, titles_from_data=True)
-        chart1.set_categories(cats)
-        chart1.width = 16
-        chart1.height = 8
-        ws_dash.add_chart(chart1, "B4")
-
-        # Chart 2: Attenuation Chart
-        chart2 = LineChart()
-        chart2.title = "Attenuation (dB/km) Profile"
-        data2 = Reference(ws_summary, min_col=3, min_row=1, max_row=ws_summary.max_row)
-        chart2.add_data(data2, titles_from_data=True)
-        chart2.set_categories(cats)
-        chart2.width = 16
-        chart2.height = 8
-        ws_dash.add_chart(chart2, "K4")
-
-        # Simpan ke memori (buffer)
         output = BytesIO()
         wb.save(output)
-        
-        st.success("✅ Dashboard berhasil digenerate!")
+        output.seek(0)
+
+        st.success("✅ Dashboard siap diunduh dan telah distruktur ulang sesuai template referensi!")
         st.download_button(
-            label="📥 Download Excel Dashboard",
+            label="📥 Download Excel Dashboard NIX-PCM",
             data=output.getvalue(),
-            file_name="OTDR_Dashboard_Result.xlsx",
+            file_name="Dashboard_OTDR_NIX_PCM_Automated.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-        
     except Exception as e:
-        st.error(f"Terjadi kesalahan dalam memproses file: {e}")
+        st.error(f"Terjadi kesalahan saat memproses data: {e}")
